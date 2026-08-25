@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Modified by the WNM-3D-RL contributors, 2026.
+set -euox pipefail
+
+
+# Define config specifications: "config_name:output_file:config_arg"
+CONFIG_SPECS=(
+    "diffusion_trainer:_generated_diffusion_trainer.yaml:--config-name=diffusion_trainer.yaml"
+)
+
+generate_config() {
+    local config_name="$1"
+    local output_file="$2"
+    local config_arg="$3"
+    # For header display, strip local file:// paths that vary per machine
+    local display_arg
+    display_arg=$(echo "$config_arg" | sed 's/ *++hydra\.searchpath=\[file:\/\/[^]]*\]//g')
+
+    local target_cfg="verl_omni/trainer/config/${output_file}"
+    local tmp_header=$(mktemp)
+    local tmp_cfg=$(mktemp)
+
+    echo "# Modified by the WNM-3D-RL contributors, 2026." > "$tmp_header"
+    echo "# This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'" >> "$tmp_header"
+    echo "# in which it invokes 'python3 scripts/print_cfg.py --cfg job ${display_arg}' to flatten the 'verl_omni/trainer/config/${config_name}.yaml' config fields into a single file." >> "$tmp_header"
+    echo "# Do not modify this file directly." >> "$tmp_header"
+    echo "# The file is usually only for reference and never used." >> "$tmp_header"
+    echo "" >> "$tmp_header"
+
+    python3 scripts/print_cfg.py --cfg job ${config_arg} > "$tmp_cfg"
+
+    cat "$tmp_header" > "$target_cfg"
+    sed -n '/^actor_rollout_ref/,$p' "$tmp_cfg" >> "$target_cfg"
+
+    rm "$tmp_cfg" "$tmp_header"
+
+    echo "Generated: $target_cfg"
+}
+
+for spec in "${CONFIG_SPECS[@]}"; do
+    IFS=':' read -r config_name output_file config_arg <<< "$spec"
+    generate_config "$config_name" "$output_file" "$config_arg"
+done
+
+for spec in "${CONFIG_SPECS[@]}"; do
+    IFS=':' read -r config_name output_file config_arg <<< "$spec"
+    target_cfg="verl_omni/trainer/config/${output_file}"
+    if ! git diff --exit-code -- "$target_cfg" >/dev/null; then
+        echo "✖ $target_cfg is out of date. Please regenerate via 'scripts/generate_trainer_config.sh' and commit the changes."
+        exit 1
+    fi
+done
+
+echo "All good"
+exit 0

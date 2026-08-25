@@ -1,0 +1,53 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Docker build context exclusions (used by: docker build -f docker/Dockerfile.cuda .)
+# NOTE: .dockerignore must live at the build context root, not under docker/.
+
+# VCS / IDE
+.git
+.github/*
+!.github/verl_pin.txt
+!.github/vllm_omni_pin.txt
+.cursor
+.vscode
+.idea
+
+# Python env & caches
+.venv
+venv
+ENV
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.cache
+.hypothesis
+
+# Training artifacts & datasets
+legacy
+dataset
+data
+checkpoints
+outputs
+output
+logs
+log
+wandb
+playground
+tensorboard_log
+recipes/**/paths.env
+*.log
+**/*.log
+events.out.tfevents*
+**/events.out.tfevents*
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.bin
+**/*.tar.gz
+**/*.parquet
+
+# Hugging Face / model caches
+.huggingface
+**/huggingface

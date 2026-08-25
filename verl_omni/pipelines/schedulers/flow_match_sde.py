@@ -1,0 +1,425 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
+from dataclasses import dataclass
+from typing import Literal, Optional
+
+import torch
+from diffusers import FlowMatchEulerDiscreteScheduler
+from diffusers.utils import BaseOutput
+from diffusers.utils.torch_utils import randn_tensor
+
+
+@dataclass
+class FlowMatchSDEDiscreteSchedulerOutput(BaseOutput):
+    """
+    Output class for the scheduler's `step` function output.
+
+    Args:
+        prev_sample (`torch.FloatTensor` of shape `(batch_size, sequence_length, num_channels)` for images):
+            Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
+            denoising loop.
+        log_prob (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+            The log probability of the previous sample.
+        prev_sample_mean (`torch.FloatTensor` of shape `(batch_size, sequence_length, num_channels)` for images):
+            The mean of the computed sample of previous timestep.
+        std_dev_t (`torch.FloatTensor` of shape `(batch_size, 1, 1)`):
+            The standard deviation used to compute `prev_sample`.
+    """
+
+    prev_sample: torch.FloatTensor
+    log_prob: Optional[torch.FloatTensor]
+    prev_sample_mean: torch.FloatTensor
+    std_dev_t: torch.FloatTensor
+
+
+class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
+    """SDE version of the FlowMatchEulerDiscreteScheduler.
+    The implementation is based on FlowGRPO paper (https://arxiv.org/abs/2505.05470)
+    and diffusers v0.37 branch.
+    """
+
+    def step(
+        self,
+        model_output: torch.FloatTensor,
+        timestep: float | torch.FloatTensor,
+        sample: torch.FloatTensor,
+        s_churn: float = 0.0,
+        s_tmin: float = 0.0,
+        s_tmax: float = float("inf"),
+        s_noise: float = 1.0,
+        generator: Optional[torch.Generator] = None,
+        per_token_timesteps: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
+        noise_level: float = 0.7,
+        prev_sample: Optional[torch.FloatTensor] = None,
+        sde_type: Literal["sde", "cps", "dance_sde"] = "sde",
+        return_logprobs: bool = True,
+        include_logprob_normalizer: bool = True,
+        log_prob_mask: Optional[torch.Tensor] = None,
+        log_prob_chunk_size: Optional[int] = None,
+    ) -> FlowMatchSDEDiscreteSchedulerOutput | tuple:
+        """
+        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
+        process from the learned model outputs (most often the predicted noise).
+
+        Modified from https://github.com/yifan123/flow_grpo/blob/main/flow_grpo/diffusers_patch/sd3_sde_with_logprob.py
+
+        Args:
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            timestep (`float`):
+                The current discrete timestep in the diffusion chain.
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            s_churn (`float`):
+            s_tmin  (`float`):
+            s_tmax  (`float`):
+            s_noise (`float`, defaults to 1.0):
+                Scaling factor for noise added to the sample.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            per_token_timesteps (`torch.Tensor`, *optional*):
+                The timesteps for each token in the sample.
+            return_dict (`bool`):
+                Whether or not to return a
+                [`~schedulers.scheduling_flow_match_euler_discrete.FlowMatchSDEDiscreteSchedulerOutput`] or tuple.
+            noise_level (`float`, *optional*, defaults to 0.7):
+                The noise level used in the SDE.
+            prev_sample (`torch.FloatTensor`, *optional*):
+                The sample from the previous timestep. If not provided, it will be sampled inside the function.
+            sde_type (`str`, *optional*, defaults to "sde"):
+                The type of SDE to use. Choose between "sde", "cps", and "dance_sde".
+            return_logprobs (`bool`, *optional*, defaults to True):
+                Whether to return log probabilities of the previous sample.
+            include_logprob_normalizer (`bool`, *optional*, defaults to True):
+                Whether to include Gaussian normalizer constants in log probabilities.
+            log_prob_mask (`torch.Tensor`, *optional*):
+                Boolean or binary mask broadcastable to ``sample``. When provided,
+                log probabilities are averaged over selected event dimensions only.
+                Every batch item must select at least one element.
+            log_prob_chunk_size (`int`, *optional*):
+                Split event dimension 1 into equal contiguous chunks and return one
+                mean log-probability per chunk. This is used by temporal world-action
+                credit; visual and generic diffusion callers leave it unset.
+        """
+
+        if isinstance(timestep, int) or isinstance(timestep, torch.IntTensor) or isinstance(timestep, torch.LongTensor):
+            raise ValueError(
+                (
+                    "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
+                    " `FlowMatchEulerDiscreteScheduler.step()` is not supported. Make sure to pass"
+                    " one of the `scheduler.timesteps` as a timestep."
+                ),
+            )
+
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        # Upcast to avoid precision issues when computing prev_sample
+        sample = sample.to(torch.float32)
+        if prev_sample is not None:
+            prev_sample = prev_sample.to(torch.float32)
+
+        prev_sample, log_prob, prev_sample_mean, std_dev_t = self.sample_previous_step(
+            sample=sample,
+            model_output=model_output,
+            generator=generator,
+            per_token_timesteps=per_token_timesteps,
+            noise_level=noise_level,
+            prev_sample=prev_sample,
+            sde_type=sde_type,
+            return_logprobs=return_logprobs,
+            include_logprob_normalizer=include_logprob_normalizer,
+            log_prob_mask=log_prob_mask,
+            log_prob_chunk_size=log_prob_chunk_size,
+        )
+
+        # upon completion increase step index by one
+        self._step_index += 1
+
+        if not return_dict:
+            return (prev_sample, log_prob, prev_sample_mean, std_dev_t)
+
+        return FlowMatchSDEDiscreteSchedulerOutput(
+            prev_sample=prev_sample, log_prob=log_prob, prev_sample_mean=prev_sample_mean, std_dev_t=std_dev_t
+        )
+
+    def sample_previous_step(
+        self,
+        sample: torch.Tensor,
+        model_output: torch.Tensor,
+        timestep: Optional[torch.FloatTensor] = None,
+        generator: Optional[torch.Generator] = None,
+        per_token_timesteps: Optional[torch.Tensor] = None,
+        noise_level: float = 0.7,
+        prev_sample: Optional[torch.Tensor] = None,
+        sde_type: Literal["cps", "sde", "dance_sde"] = "sde",
+        return_logprobs: bool = True,
+        return_sqrt_dt: bool = False,
+        include_logprob_normalizer: bool = True,
+        log_prob_mask: Optional[torch.Tensor] = None,
+        log_prob_chunk_size: Optional[int] = None,
+    ):
+        """
+        Run a single SDE / CPS reverse step.
+
+        Args:
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            timestep (`torch.FloatTensor`, *optional*):
+                The current discrete timestep in the diffusion chain. When `None`, the internal
+                `step_index` is used (sequential denoising loop).
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            per_token_timesteps (`torch.Tensor`, *optional*):
+                The timesteps for each token in the sample. Currently not supported.
+            noise_level (`float`, *optional*, defaults to 0.7):
+                The noise level used in the SDE.
+            prev_sample (`torch.FloatTensor`, *optional*):
+                The sample from the previous timestep. If provided, it is used directly for
+                log-probability computation instead of being sampled.
+            sde_type (`str`, *optional*, defaults to "sde"):
+                The type of SDE to use. Choose between "sde", "cps", and "dance_sde".
+            return_logprobs (`bool`, *optional*, defaults to True):
+                Whether to return log probabilities of the previous sample.
+            return_sqrt_dt (`bool`, *optional*, defaults to False):
+                Whether to additionally return `sqrt(-dt)` as a tensor of shape `(batch_size,)`.
+                Used by GRPO-Guard to compute the importance-ratio normalization
+                (see `GRPOGuardLoss`).
+            include_logprob_normalizer (`bool`, *optional*, defaults to True):
+                Whether to include Gaussian normalizer constants in log probabilities.
+            log_prob_mask (`torch.Tensor`, *optional*):
+                Boolean or binary mask broadcastable to ``sample``. When provided,
+                log probabilities are averaged over selected event dimensions only.
+                Every batch item must select at least one element.
+            log_prob_chunk_size (`int`, *optional*):
+                Split event dimension 1 into equal contiguous chunks and return one
+                reduced log-probability per chunk.
+        """
+        assert sde_type in ["sde", "cps", "dance_sde"]
+        assert sample.dtype == torch.float32
+        if prev_sample is not None:
+            assert prev_sample.dtype == torch.float32
+        assert model_output.dtype == torch.float32
+
+        if per_token_timesteps is not None:
+            raise NotImplementedError("per_token_timesteps is not supported yet for FlowMatchSDEDiscreteScheduler.")
+        else:
+            if timestep is None:
+                sigma_idx = self.step_index
+                sigma = self.sigmas[sigma_idx]
+                sigma_prev = self.sigmas[sigma_idx + 1]
+            else:
+                sigma_idx = torch.tensor([self.index_for_timestep(t) for t in timestep])
+                sigma = self.sigmas[sigma_idx].view(-1, *([1] * (len(sample.shape) - 1)))
+                sigma_prev = self.sigmas[sigma_idx + 1].view(-1, *([1] * (len(sample.shape) - 1)))
+
+            sigma_max = self.sigmas[1]
+            dt = sigma_prev - sigma
+
+        if sde_type == "sde":
+            std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * noise_level
+
+            prev_sample_mean = (
+                sample * (1 + std_dev_t**2 / (2 * sigma) * dt)
+                + model_output * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
+            )
+
+            if prev_sample is None:
+                variance_noise = randn_tensor(
+                    model_output.shape,
+                    generator=generator,
+                    device=model_output.device,
+                    dtype=model_output.dtype,
+                )
+                prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-1 * dt) * variance_noise
+
+            if return_logprobs:
+                log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2) / (
+                    2 * ((std_dev_t * torch.sqrt(-1 * dt)) ** 2)
+                )
+                if include_logprob_normalizer:
+                    log_prob = (
+                        log_prob
+                        - torch.log(std_dev_t * torch.sqrt(-1 * dt))
+                        - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
+                    )
+            else:
+                log_prob = None
+
+        elif sde_type == "cps":
+            std_dev_t = sigma_prev * math.sin(noise_level * math.pi / 2)
+            pred_original_sample = sample - sigma * model_output
+            noise_estimate = sample + model_output * (1 - sigma)
+            prev_sample_mean = pred_original_sample * (1 - sigma_prev) + noise_estimate * torch.sqrt(
+                sigma_prev**2 - std_dev_t**2
+            )
+
+            if prev_sample is None:
+                variance_noise = randn_tensor(
+                    model_output.shape,
+                    generator=generator,
+                    device=model_output.device,
+                    dtype=model_output.dtype,
+                )
+                prev_sample = prev_sample_mean + std_dev_t * variance_noise
+
+            if return_logprobs:
+                log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2)
+            else:
+                log_prob = None
+
+        elif sde_type == "dance_sde":
+            # DanceGRPO SDE step from https://github.com/XueZeyue/DanceGRPO
+            # Based on score-based SDE correction with eta (noise_level) controlling
+            # the stochasticity. This formulation is numerically stable even when
+            # sigma is close to 1, unlike the FlowGRPO "sde" variant.
+            dsigma = sigma_prev - sigma  # negative (sigma decreases)
+            delta_t = sigma - sigma_prev  # positive
+
+            # ODE mean: x_{t-1} = x_t + dsigma * model_output
+            prev_sample_mean = sample + dsigma * model_output
+
+            # Predicted original sample: x_0 = x_t - sigma * model_output
+            pred_original_sample = sample - sigma * model_output
+
+            # Score-based SDE correction term
+            # score_estimate = -(x_t - x_0 * (1 - sigma)) / sigma^2
+            # log_term = -0.5 * eta^2 * score_estimate
+            # prev_sample_mean += log_term * dsigma
+            score_estimate = -(sample - pred_original_sample * (1 - sigma)) / (sigma**2)
+            log_term = -0.5 * noise_level**2 * score_estimate
+            prev_sample_mean = prev_sample_mean + log_term * dsigma
+
+            # Noise standard deviation: eta * sqrt(delta_t)
+            std_dev_t = noise_level * torch.sqrt(delta_t)
+
+            if prev_sample is None:
+                variance_noise = randn_tensor(
+                    model_output.shape,
+                    generator=generator,
+                    device=model_output.device,
+                    dtype=model_output.dtype,
+                )
+                prev_sample = prev_sample_mean + std_dev_t * variance_noise
+
+            if return_logprobs:
+                log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
+                if include_logprob_normalizer:
+                    log_prob = log_prob - torch.log(std_dev_t) - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
+            else:
+                log_prob = None
+
+        # Mean along all but the batch dimension. A policy mask lets joint
+        # world/action models exclude padded or otherwise non-policy action
+        # coordinates without changing how the transition itself is sampled.
+        log_prob = (
+            self._reduce_log_prob(
+                log_prob,
+                log_prob_mask,
+                chunk_size=log_prob_chunk_size,
+            )
+            if log_prob is not None
+            else None
+        )
+        if return_sqrt_dt:
+            sqrt_dt = torch.sqrt(-1 * dt)
+            if sqrt_dt.ndim == 0:
+                sqrt_dt = sqrt_dt.expand(sample.shape[0]).clone()
+            else:
+                sqrt_dt = sqrt_dt.reshape(sqrt_dt.shape[0])
+            return prev_sample, log_prob, prev_sample_mean, std_dev_t, sqrt_dt
+        return prev_sample, log_prob, prev_sample_mean, std_dev_t
+
+    @staticmethod
+    def _reduce_log_prob(
+        log_prob: torch.Tensor,
+        log_prob_mask: Optional[torch.Tensor],
+        *,
+        chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Reduce elementwise transition likelihoods per sample or temporal chunk."""
+        reduce_dims = tuple(range(1, log_prob.ndim))
+        if not reduce_dims:
+            raise ValueError(
+                "FlowMatchSDEDiscreteScheduler expects samples with a batch dimension and at least one event "
+                f"dimension, but received elementwise log-probabilities with shape {tuple(log_prob.shape)}."
+            )
+        if chunk_size is not None:
+            if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size <= 0:
+                raise ValueError(f"log-prob chunk_size must be a positive integer, got {chunk_size!r}.")
+            horizon = int(log_prob.shape[1])
+            if horizon % chunk_size:
+                raise ValueError(
+                    "Temporal log-probability chunks must exactly cover event dimension 1: "
+                    f"horizon={horizon}, chunk_size={chunk_size}."
+                )
+            num_chunks = horizon // chunk_size
+            chunked_shape = (log_prob.shape[0], num_chunks, chunk_size, *log_prob.shape[2:])
+            log_prob = log_prob.reshape(chunked_shape)
+            reduce_dims = tuple(range(2, log_prob.ndim))
+
+        if log_prob_mask is None:
+            return log_prob.mean(dim=reduce_dims)
+        if not isinstance(log_prob_mask, torch.Tensor):
+            raise TypeError(f"log_prob_mask must be a torch.Tensor, got {type(log_prob_mask).__name__}.")
+
+        mask = log_prob_mask.detach().to(device=log_prob.device)
+        if chunk_size is not None:
+            original_horizon = int(mask.shape[1]) if mask.ndim > 1 else None
+            try:
+                mask = torch.broadcast_to(
+                    mask,
+                    (
+                        log_prob.shape[0],
+                        log_prob.shape[1] * log_prob.shape[2],
+                        *log_prob.shape[3:],
+                    ),
+                )
+            except RuntimeError as exc:
+                raise ValueError(
+                    "log_prob_mask must be broadcastable to the unchunked elementwise "
+                    "log-probability tensor; "
+                    f"mask={tuple(mask.shape)}, horizon={original_horizon}, "
+                    f"chunked_log_prob={tuple(log_prob.shape)}."
+                ) from exc
+            mask = mask.reshape(log_prob.shape)
+        try:
+            mask = torch.broadcast_to(mask, log_prob.shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                "log_prob_mask must be broadcastable to the elementwise log-probability tensor; "
+                f"mask={tuple(mask.shape)}, log_prob={tuple(log_prob.shape)}."
+            ) from exc
+
+        if mask.dtype != torch.bool:
+            if mask.is_complex() or (torch.is_floating_point(mask) and not torch.isfinite(mask).all()):
+                raise ValueError("log_prob_mask must contain only finite binary values (0 or 1).")
+            if not torch.all((mask == 0) | (mask == 1)):
+                raise ValueError("log_prob_mask must contain only binary values (0 or 1).")
+            mask = mask.to(torch.bool)
+
+        selected_count = mask.sum(dim=reduce_dims)
+        if torch.any(selected_count == 0):
+            raise ValueError("log_prob_mask must select at least one event element for every batch item.")
+
+        # torch.where avoids propagating NaNs from excluded coordinates (0 * NaN
+        # would still be NaN) and keeps gradients only through selected values.
+        masked_log_prob = torch.where(mask, log_prob, torch.zeros((), device=log_prob.device, dtype=log_prob.dtype))
+        return masked_log_prob.sum(dim=reduce_dims) / selected_count.to(dtype=log_prob.dtype)

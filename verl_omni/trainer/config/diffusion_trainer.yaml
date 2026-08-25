@@ -1,0 +1,337 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# specify the default per-component configs
+defaults:
+
+  - diffusion/model_engine: dp_diffusion
+
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+
+  # data: trainer/config/data/legacy_data.yaml
+  - data@data: legacy_data
+
+  # Reference model config.
+  # Reference model will be enabled when actor.use_kl_loss is True.
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+
+  # Rollout model config.
+  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
+
+  # Model config.
+  - diffusion/model@actor_rollout_ref.model: diffusion_model
+
+  # Reward config.
+  - reward@reward: reward
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Whether it's a hybrid engine, currently only supports hybrid engine
+  hybrid_engine: true
+
+  # Timeout for operations executed against the process group
+  nccl_timeout: 600
+
+  # Model config
+  model:
+
+    # Select diffusion agent loop and DiffusionModelConfig
+    model_type: "diffusion_model"
+
+# config for the algorithm
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+
+  # Trainer loop: policy_gradient (FlowGRPO, MixGRPO, …) or direct_preference (DPO, DiffusionNFT, AWM)
+  trainer_type: policy_gradient
+
+  # Sample provenance: online (rollout+reward engines) or offline (actor-only, precomputed batches)
+  sample_source: online
+
+  # Advantage estimator type: follows actor_rollout_ref.model.algorithm
+  adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
+
+  # Whether to normalize advantages by std (specific to GRPO)
+  norm_adv_by_std_in_grpo: True
+
+  # Whether to normalize advantages using global standard deviation
+  global_std: True
+
+  # DiffusionNFT old-policy EMA schedule; choices are copy, linear_to_0_5, delayed_linear_to_0_999.
+  old_policy_decay_schedule: copy
+
+  # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_schedule.
+  old_policy_decay: null
+
+  # DiffusionNFT optimizer steps between old-policy adapter refreshes
+  old_policy_update_interval: 1
+
+  # DiffusionNFT fraction of rollout timesteps used for forward-process training
+  timestep_fraction: 1.0
+
+  # DiffusionNFT advantage mapping mode before reward-probability scaling
+  adv_mode: continuous
+
+  # True for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle
+  paired_preference: false
+
+  # Fail-closed parity check between vLLM-Omni rollout likelihoods and actor replay likelihoods.
+  # Enable this when rollout.calculate_log_probs=true and actor/rollout weights are synchronized.
+  rollout_log_prob_validation:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.trainer.config.algorithm.RolloutLogProbValidationConfig
+
+    # Whether to enforce rollout/actor replay parity before every policy update
+    enabled: false
+
+    # Also replay held-out validation rollouts and report ratio/clip/KL diagnostics
+    validate: false
+
+    # Absolute tolerance for each visual/action denoising-step log probability
+    atol: 1e-3
+
+    # Relative tolerance for each visual/action denoising-step log probability
+    rtol: 1e-3
+
+    # Optional action-only overrides; null keeps the visual/base tolerance.
+    action_atol: null
+
+    # Optional action-only relative tolerance; null keeps the visual/base tolerance.
+    action_rtol: null
+
+  # Estimate KL(current || immutable training-base policy) on held-out
+  # current-policy trajectories. This creates a reference FSDP engine but runs
+  # it only during validation, never in the training loss.
+  validation_reference_kl:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.trainer.config.algorithm.ValidationReferenceKLConfig
+
+    # Whether to report held-out KL against the immutable training-base policy
+    enabled: false
+
+    # Keep actor and reference replay at deployment-equivalent B=1.
+    micro_batch_size_per_gpu: 1
+
+  # Rollout Correction (experimental).  Fields mirror RolloutCorrectionConfig.
+  rollout_correction:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+
+    # When True, skip old-log-prob recompute and use rollout_log_probs directly
+    # (2-policy bypass). When False, keep the recompute pass for 3-policy
+    # decoupled mode with IS correction from rollout to old.
+    bypass_mode: False
+
+    # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio).
+    loss_type: ppo_clip
+
+    # IS aggregation: null (off), "token", or "sequence".
+    # In bypass ppo_clip mode controls metrics only (PPO ratio handles IS).
+    rollout_is: null
+
+    # IS truncation threshold: float -> TIS upper clamp, "lower_upper" -> IcePop.
+    rollout_is_threshold: 2.0
+
+    # Normalize IS weights to mean=1.0 across the batch.
+    rollout_is_batch_normalize: false
+
+    # RS mode(s), comma-separated (e.g. "seq_mean_k1").
+    rollout_rs: null
+
+    # RS threshold spec. K1 modes: "lower_upper"; K2/K3: a single upper bound.
+    rollout_rs_threshold: null
+
+# config for the trainer
+trainer:
+
+  # Number of epochs in training
+  total_epochs: 30
+
+  # Total training steps (can be set explicitly or derived from epochs)
+  total_training_steps: null
+
+  # Project name for experiment tracking (e.g., wandb)
+  project_name: verl_examples
+
+  # Experiment name for run identification in tracking tools (diffusion / FlowGRPO examples)
+  experiment_name: ocr
+
+  # Logging backends to use: "console", "wandb", etc.
+  logger: ["console", "wandb"]
+
+  # Number of generations to log during validation
+  log_val_generations: 0
+
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
+
+  # Directory for logging validation data; no dump if null
+  validation_data_dir: null
+
+  # Number of nodes used in the training
+  nnodes: 1
+
+  # Number of GPUs per node
+  n_gpus_per_node: 8
+
+  # Save frequency (by iteration) for model checkpoints
+  save_freq: -1
+
+  # ESI refers to the elastic server instance used during training, similar to the training plan. For example,
+  # if you purchase 10 hours of computing power, the ESI will automatically shut down after 10 hours of training.
+  # To ensure a checkpoint is saved before ESI shuts down, the system will start saving a checkpoint in advance.
+  # The advance time is calculated as: Advance Time = Longest historical step duration + Checkpoint save duration + esi_redundant_time.
+  # Here, esi_redundant_time is a user-defined value that further extends the advance time for added safety.
+  esi_redundant_time: 0
+
+  # Resume mode: "auto", "disable", or "resume_path"
+  # "auto": resume from last checkpoint if available
+  # "disable": start from scratch
+  # "resume_path": resume from a user-defined path
+  resume_mode: auto
+
+  # Path to resume training from (only used when resume_mode is "resume_path")
+  resume_from_path: null
+
+  # Whether to run validation before training begins
+  val_before_train: True
+
+  # Whether to run validation only
+  val_only: False
+
+  # Validation frequency (in training iterations)
+  test_freq: -1
+
+  # Default path to distributed filesystem for saving checkpoints
+  default_hdfs_dir: null
+
+  # Whether to delete local checkpoints after loading
+  del_local_ckpt_after_load: False
+
+  # Default local directory for saving checkpoints
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Maximum number of actor checkpoints to keep
+  max_actor_ckpt_to_keep: null
+
+  # Timeout (in seconds) for Ray worker to wait for registration
+  ray_wait_register_center_timeout: 300
+
+  # Device to run training on (e.g., "cuda", "cpu")
+  device: cuda
+
+# Profiler configs (mirrors verl/trainer/config/ppo_trainer.yaml `global_profiler`).
+# Only nsys, torch and torch_memory tools are supported.
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool: choose between nsys, torch, torch_memory
+  tool: null
+
+  # Steps at which profiling should be performed (e.g. [1, 2, 5]). null disables profiling.
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  # If True, worker.profiler.discrete must be False, [1,2] in one db, [5] in another.
+  # If False, [1] in one, [2] in another, [5] in another.
+  profile_continuous_steps: False
+
+  # Path to save profiling contents
+  save_path: "outputs/profile"
+
+  # Tool-specific global configurations.
+  # Override on the CLI via +global_profiler.global_tool_config.[tool].xxx=yyy
+  global_tool_config:
+
+    # NVIDIA Nsight Systems config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # Controller-side Nsight Systems options. Must be set when global_profiler.steps is not null
+      # and global_profiler.tool == "nsys".
+      # See https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+      controller_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+      # Worker-side Nsight Systems options. Must be set when using nsys with profile steps.
+      worker_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop. Do not change.
+        capture-range: "cudaProfilerApi"
+
+        # Specify desired behavior when a capture range ends.
+        # Valid values: "repeat-shutdown:n" or null.
+        capture-range-end: null
+
+        # Send signal to the target application's process group. Let the program exit by itself.
+        kill: none
+
+    # Torch CUDA memory snapshot dumping
+    torch_memory:
+
+      # Maximum number of allocation entries to record
+      trace_alloc_max_entries: 100_000
+
+      # Depth of the call stack to capture for each allocation
+      stack_depth: 32
+
+      # 'alloc': allocations only | 'state': state changes only | 'all': both.
+      context: "all"
+
+      # 'python': Python stacks | 'cpp': C++ stacks | 'all': both.
+      stacks: "all"
+
+      # Extra keyword arguments forwarded to torch.cuda.memory._record_memory_history.
+      kw_args: {}
+
+# configs related to ray
+ray_kwargs:
+
+  # configs related to ray initialization
+  ray_init:
+
+    # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
+    num_cpus: null
+
+  # Path to save Ray timeline JSON for performance profiling
+  timeline_json_file: null

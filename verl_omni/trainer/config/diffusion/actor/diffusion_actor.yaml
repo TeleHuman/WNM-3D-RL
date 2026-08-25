@@ -1,0 +1,162 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.DiffusionActorConfig
+
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# the abstract actor configs
+# fsdp, fsdp2 or megatron. must be set.
+strategy: ???
+
+# Split each sample into sub-batches of this size for PPO
+ppo_mini_batch_size: 256
+
+# Local per-GPU micro batch size
+ppo_micro_batch_size_per_gpu: null
+
+# diffusion loss config
+diffusion_loss:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
+
+  # Loss function mode: follows actor_rollout_ref.model.algorithm
+  loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
+
+  # PPO clip ratio
+  clip_ratio: 0.0001
+
+  # Visual-branch PPO clip ratio; null falls back to clip_ratio
+  visual_clip_ratio: null
+
+  # Action-branch PPO clip ratio; null falls back to clip_ratio
+  action_clip_ratio: null
+
+  # Maximum value to clamp advantages before computing policy loss
+  adv_clip_max: 5.0
+
+  # Weight applied to the visual transition log-probability in joint WAM objectives
+  visual_log_prob_weight: 1.0
+
+  # Weight applied to the action transition log-probability in joint WAM objectives
+  action_log_prob_weight: 1.0
+
+  # Relative weight for the independently normalized STOP action stream
+  action_stop_loss_weight: 0.0
+
+  # Whether STOP credit follows decayed navigation chunk weights
+  action_stop_use_chunk_weights: false
+
+  # Relative weight for the independently normalized collision action stream
+  action_collision_loss_weight: 0.0
+
+  # Whether collision credit follows decayed navigation chunk weights
+  action_collision_use_chunk_weights: false
+
+  # DiffusionNFT beta for positive and implicit-negative prediction mixing
+  mix_beta: 0.5
+
+  # DiffusionNFT prediction-space reference MSE coefficient
+  ref_kl_coef: 0.0
+
+  # DiffusionNFT minimum adaptive denominator for x0 reconstruction losses
+  adaptive_weight_min: 1e-5
+
+  # DPO inverse temperature for pairwise flow-matching preference loss
+  dpo_beta: 2000.0
+
+  # Flow-DPPO divergence threshold for masking high-KL policy updates
+  kl_mask_threshold: 1e-5
+
+  # Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale
+  add_kl_coefficient: true
+
+# Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
+# rollout_is defaults to null (off); override for IS diagnostics.
+rollout_correction:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+
+  # When True, skip old-log-prob recompute and use rollout_log_probs directly
+  # (2-policy bypass). When False, keep the recompute pass for 3-policy
+  # decoupled mode with IS correction from rollout to old.
+  bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+
+  # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio)
+  loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+
+  # IS aggregation level: null (off), "token" (per-token), or "sequence" (per-sequence)
+  # In bypass ppo_clip mode this controls metrics only (PPO ratio handles IS)
+  rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+
+  # IS truncation threshold: float -> TIS upper clamp, "lower_upper" string -> IcePop bounds
+  rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+
+  # Normalize IS weights to mean=1.0 across the batch before applying
+  rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+
+  # RS aggregation mode: null (off), e.g. "token_k1", "seq_sum_k1", "seq_mean_k1"
+  rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+
+  # RS threshold spec: K1 modes use "lower_upper" string; K2/K3 use a single upper-bound float
+  rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+
+# loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
+loss_scale_factor: null
+
+# Whether to use KL loss
+use_kl_loss: false
+
+# KL loss coefficient when use_kl_loss is enabled. For FlowGRPO
+kl_loss_coef: 0.001
+
+# Number of PPO epochs per batch
+ppo_epochs: 1
+
+# Shuffle training data across PPO epochs
+shuffle: false
+
+# The seed used to construct mini-batch
+data_loader_seed: 42
+
+# checkpoint configs
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # For more flexibility, you can specify the contents to load from the checkpoint.
+  # .xxx refers to the local variable xxx from the same level of hierarchy similar to python pkg
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
+  async_save: False
+
+# optimizer configs
+optim:
+
+  # Learning rate
+  lr: 1e-6
+
+  # Warmup steps ratio (used if lr_warmup_steps is 0 or negative)
+  lr_warmup_steps_ratio: 0.0
+
+  # Total training steps (must be overridden at runtime)
+  total_training_steps: -1
+
+  # Weight decay
+  weight_decay: 0.01
+
+  # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
+  lr_warmup_steps: -1

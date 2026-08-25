@@ -1,0 +1,258 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# -------------------------------
+# build-system
+# -------------------------------
+[build-system]
+requires = [
+    "setuptools>=77.0",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+# -------------------------------
+# project (PEP 621 metadata)
+# -------------------------------
+[project]
+name = "verl-omni"
+dynamic = ["version"]
+description = "WNM-3D-RL: Stage-3 navigation GRPO on VERL-Omni"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.11,<3.13"
+authors = [{name = "TeleHuman Research"}]
+keywords = [
+    "embodied-ai",
+    "reinforcement-learning",
+    "vision-language-navigation",
+    "world-models",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "accelerate>=1.14.0",
+    "cachetools",
+    "codetiming",
+    "datasets",
+    "diffusers>=0.37.1",
+    "dill",
+    "hydra-core",
+    "huggingface-hub",
+    "msgspec",
+    "numpy",
+    "omegaconf",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pydantic>=2",
+    "psutil",
+    "ray[default]",
+    "requests",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "torchdata",
+    "tqdm",
+    "transformers",
+    "wandb",
+    "packaging>=20.0",
+    "uvicorn",
+    "fastapi",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+# Rollout engine (install in step 2, after gpu step 1).
+vllm-omni = [
+    "vllm-omni==0.24.0",
+]
+# CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
+gpu = [
+    "vllm==0.24.0",
+    "kernels==0.14.1",
+    "liger-kernel",
+]
+# WNM attention extension. Install this after the CUDA torch stack with build
+# isolation disabled; see README.md and docker/Dockerfile.cuda.
+attention = [
+    "flash-attn>=2.8,<3",
+]
+# Training stack (install in step 2).
+# Git commit must match .github/verl_pin.txt (reports as 0.9.0.dev0 at 8a69493).
+train = [
+    "verl @ git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd",
+]
+# WNM-3D Stage-3 navigation data, reward, rollout, and checkpoint tooling.
+# WNM-3D itself is mounted as a separate source/model tree at runtime.
+wam = [
+    "albumentations==1.4.18",
+    "av==15.0.0",
+    "dm-tree",
+    "einops==0.8.1",
+    "ftfy",
+    "gymnasium",
+    "ijson",
+    "imageio>=2.37.2,<3",
+    "imageio-ffmpeg",
+    "opencv-python-headless",
+    "pillow",
+    "pyyaml",
+    "regex",
+    "safetensors",
+    "scikit-image",
+    "scipy",
+    "sentencepiece",
+    "tianshou==0.5.1",
+    "timm",
+    "torchvision",
+    "websockets>=14",
+]
+dev = [
+    "build>=1.2,<2",
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+    "py-spy",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+    "ruff==0.12.2",
+]
+
+[project.urls]
+Homepage = "https://wnm-3d.github.io/"
+Paper = "https://arxiv.org/abs/2608.07267"
+Repository = "https://github.com/TeleHuman/WNM-3D-RL"
+Issues = "https://github.com/TeleHuman/WNM-3D-RL/issues"
+Models = "https://huggingface.co/TeleEmbodied/WNM-3D"
+
+# -------------------------------
+# tool.ruff - Linting configuration
+# -------------------------------
+[tool.ruff]
+# Note: While the formatter will attempt to format lines such that they remain within the line-length,
+# it isn't a hard upper bound, and formatted lines may exceed the line-length.
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+isort = {known-first-party = ["verl_omni"]}
+# c.f. https://github.com/vllm-project/vllm/blob/ce8d6b75fc0586045df75ee1568a5b5f9957251b/pyproject.toml
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    "I",
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # `.log()` statement uses f-string
+    "G004",
+    # X | None for type annotations
+    "UP045",
+    # deprecated import
+    "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# This probe sets thread/attention environment variables before importing its
+# numerical stack; moving the imports would change the behavior under test.
+# Keep the Jinja template as one audited byte string; wrapping it obscures the
+# newline-sensitive chat-template contract.
+"verl_omni/agent_loop/diffusion_agent_loop.py" = ["E501"]
+
+# -------------------------------
+# tool.mypy - typechecking config
+# -------------------------------
+[tool.mypy]
+pretty            = true
+ignore_missing_imports = true
+explicit_package_bases = true
+follow_imports = "skip"
+
+# Blanket silence
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+"verl_omni.trainer.config.algorithm",
+]
+ignore_errors = false
+
+# -------------------------------
+# tool.coverage - Test coverage
+# -------------------------------
+[tool.coverage.run]
+branch = true
+source = ["verl_omni"]
+omit = [
+    "verl_omni/version/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == '__main__':",
+]
+
+# -------------------------------
+# tool.setuptools - Additional config
+# -------------------------------
+[tool.setuptools]
+# Package data is explicitly enumerated below so YAML-only configuration
+# directories are not mistaken for Python namespace packages.
+include-package-data = false
+# The wheel is the Python library distribution. The source-only Stage-III
+# recipe remains in the Git repository and is intentionally not packaged.
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["verl_omni*"]
+namespaces = false
+
+# We read the version from a file in 'verl_omni/version/version'
+[tool.setuptools.dynamic]
+version = {file = "verl_omni/version/version"}
+
+# If you need to mimic `package_dir={'': '.'}`:
+[tool.setuptools.package-dir]
+"" = "."
+
+# If you need to include specific non-Python data (like YAML files or version file):
+[tool.setuptools.package-data]
+verl_omni = [
+  "version/*",
+  "trainer/config/*.yaml",
+  "trainer/config/*/*.yaml",
+  "trainer/config/*/*/*.yaml",
+]
+
+# -------------------------------
+# tool.uv - Package resolution overrides
+# -------------------------------
+[tool.uv]
+override-dependencies = [
+    "accelerate>=1.14.0",
+]

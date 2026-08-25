@@ -1,0 +1,49 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# c.f. https://github.com/pre-commit/action?tab=readme-ov-file#using-this-action
+name: pre-commit
+
+# No need to avoid / cancel lightweight pre-commit jobs
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  pull_request:
+  push:
+    branches:
+      - main
+  # Allow manual triggering
+  workflow_dispatch:
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the current repository
+        run: |
+          pip install "build>=1.2,<2" pre-commit hydra-core
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "ray" "tensordict"
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          pip install --no-deps -e .
+      - name: Set ruff --output-format=github
+        run: |
+          sed -i 's/--output-format=full/--output-format=github/' .pre-commit-config.yaml
+          git add .pre-commit-config.yaml
+      # Check "--all-files" by default
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      - name: Build and inspect wheel
+        run: |
+          python -m build --wheel --outdir wheelhouse
+          python tools/ci/check_wheel_contents.py wheelhouse/*.whl

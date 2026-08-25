@@ -1,0 +1,98 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+name: cpu_unit_tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "examples/dancegrpo_trainer/**"
+      - "recipes/wnm_3d/stage3/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - .github/workflows/cpu_unit_tests.yml
+      - .github/verl_pin.txt
+      - .github/vllm_omni_pin.txt
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "examples/dancegrpo_trainer/**"
+      - "recipes/wnm_3d/stage3/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - .github/workflows/cpu_unit_tests.yml
+      - .github/verl_pin.txt
+      - .github/vllm_omni_pin.txt
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  cpu_unit_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    env:
+      TORCH_COMPILE_DISABLE: 1
+      TORCHINDUCTOR_DISABLE: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+          pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          pip install ".[dev,wam]"
+          pip install --no-deps -e .
+      - name: Validate Stage-3 release entry points
+        run: |
+          find recipes/wnm_3d/stage3 -type f -name '*.sh' -print0 \
+            | xargs -0 -n1 bash -n
+          python -m compileall -q recipes/wnm_3d/stage3 tools/data
+          python tools/data/build_vggt_stage3_event_val.py --help >/dev/null
+      - name: Run CPU unit tests
+        run: |
+          echo '[pytest]' > pytest.ini
+          echo 'python_files = *_on_cpu.py' >> pytest.ini
+          set -o pipefail
+          pytest -s -x --asyncio-mode=auto \
+            --cov=verl_omni \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            tests/ | tee pytest-coverage.txt
+      - name: Add coverage summary
+        if: always()
+        run: |
+          {
+            echo "## CPU unit test coverage"
+            echo
+            echo '```text'
+            python -c 'from pathlib import Path; output = Path("pytest-coverage.txt"); text = output.read_text() if output.exists() else "Coverage output was not generated."; lines = text.splitlines(); start = next((idx for idx, line in enumerate(lines) if line.startswith("Name")), None); print(text if start is None else "\n".join(lines[start:]))'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpu-unit-test-coverage
+          path: |
+            coverage.xml
+            pytest-coverage.txt
+          if-no-files-found: ignore

@@ -1,0 +1,105 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# WNM-3D-RL CUDA image for Stage-3 navigation GRPO.
+#
+# Build from the repository root:
+#   docker build -f docker/Dockerfile.cuda --target dev -t wnm-3d-rl:cu130-dev .
+#
+# The external WNM-3D source/model tree is not copied into this image.
+# Mount it at /workspace/wnm-3d (or override WNM3D_SOURCE_ROOT) when the
+# container starts. Dataset, checkpoint, and output paths are likewise runtime
+# mounts configured through recipes/wnm_3d/stage3/paths.env.
+
+ARG CUDA_VERSION=13.0.2
+ARG UBUNTU_VERSION=22.04
+ARG VLLM_VERSION=0.24.0
+ARG KERNELS_VERSION=0.14.1
+ARG VERL_GIT_REF=
+ARG VLLM_OMNI_GIT_REF=
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG VLLM_VERSION
+ARG KERNELS_VERSION
+ARG VERL_GIT_REF
+ARG VLLM_OMNI_GIT_REF
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=0 \
+    UV_PYTHON_DOWNLOADS=manual \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
+    LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}" \
+    WAM_REPO_ROOT=/workspace/WNM-3D-RL \
+    WNM3D_SOURCE_ROOT=/workspace/wnm-3d \
+    PYTHONPATH=/workspace/WNM-3D-RL:/workspace/wnm-3d
+
+# iproute2: IB-aware Ray address selection
+# rsync/openssh-client: multi-node source and checkpoint staging
+# ffmpeg: GN0 trajectory/video decoding
+# rdma-core/libibverbs: NCCL/Ray communication over InfiniBand
+# procps/numactl: launcher diagnostics and CPU affinity
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    git \
+    ibverbs-providers \
+    iproute2 \
+    libglib2.0-0 \
+    libibverbs1 \
+    ninja-build \
+    numactl \
+    openssh-client \
+    procps \
+    rdma-core \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ulimit -n 65536 \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv python install 3.12 \
+    && uv venv "${VIRTUAL_ENV}" --python 3.12 --seed
+
+WORKDIR /workspace/WNM-3D-RL
+
+# Copy dependency metadata and immutable upstream pins first so the expensive
+# CUDA dependency layers stay cached across ordinary source changes.
+COPY pyproject.toml setup.py README.md ./
+COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
+
+# Install the CUDA rollout/attention stack before the project dependencies so
+# uv selects the PyTorch build compatible with vLLM.
+RUN uv pip install --torch-backend=auto \
+        "vllm==${VLLM_VERSION}" \
+        "kernels==${KERNELS_VERSION}" \
+        liger-kernel
+
+# Both dependencies use the repository pins by default. Build arguments are
+# available only for audited pin updates or release-candidate validation.
+RUN VLLM_OMNI_REF="${VLLM_OMNI_GIT_REF:-$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)}" \
+    && echo "Installing vllm-omni@${VLLM_OMNI_REF}" \
+    && uv pip install \
+        "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@${VLLM_OMNI_REF}"
+
+COPY . .
+
+# train: pinned verl stack
+# wam: WNM transforms, OpenCV/video, geometry rewards, Tianshou, and data tools
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+    && echo "Installing verl@${VERL_REF} and WNM-3D-RL" \
+    && uv pip install \
+        "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}" \
+    && uv pip install -e ".[wam]" \
+    && MAX_JOBS=8 uv pip install --no-build-isolation -e ".[attention]"
+
+
+FROM base AS runtime
+WORKDIR /workspace/WNM-3D-RL
+CMD ["/bin/bash"]
+
+
+FROM base AS dev
+RUN uv pip install -e ".[dev]"

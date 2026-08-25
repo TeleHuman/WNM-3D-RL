@@ -1,0 +1,336 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""CPU tests for verl_omni worker config dataclasses."""
+
+import os
+
+import pytest
+
+from verl_omni.trainer.config.algorithm import (
+    DiffusionAlgoConfig,
+    RolloutLogProbValidationConfig,
+    ValidationReferenceKLConfig,
+)
+from verl_omni.workers.config.diffusion.actor import (
+    DiffusionLossConfig,
+    FSDPDiffusionActorConfig,
+)
+from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
+from verl_omni.workers.config.diffusion.rollout import (
+    DiffusionRolloutAlgoConfig,
+    DiffusionRolloutConfig,
+    DiffusionSamplingConfig,
+)
+
+# ---------------------------------------------------------------------------
+# DiffusionLossConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDiffusionLossConfig:
+    def test_defaults(self):
+        cfg = DiffusionLossConfig()
+        assert cfg.loss_mode == "flow_grpo"
+        assert cfg.clip_ratio == pytest.approx(0.0001)
+        assert cfg.adv_clip_max == pytest.approx(5.0)
+        assert cfg.visual_log_prob_weight == pytest.approx(1.0)
+        assert cfg.action_log_prob_weight == pytest.approx(1.0)
+        assert cfg.mix_beta == pytest.approx(0.5)
+        assert cfg.ref_kl_coef == pytest.approx(0.0)
+        assert cfg.adaptive_weight_min == pytest.approx(1e-5)
+        assert cfg.kl_mask_threshold == pytest.approx(1e-5)
+        assert cfg.add_kl_coefficient is True
+
+    def test_custom_values(self):
+        cfg = DiffusionLossConfig(
+            loss_mode="dance_grpo",
+            clip_ratio=0.01,
+            adv_clip_max=10.0,
+            visual_log_prob_weight=0.25,
+            action_log_prob_weight=2.0,
+            mix_beta=0.25,
+            ref_kl_coef=0.1,
+            adaptive_weight_min=1e-4,
+            kl_mask_threshold=1e-6,
+            add_kl_coefficient=False,
+        )
+        assert cfg.loss_mode == "dance_grpo"
+        assert cfg.clip_ratio == pytest.approx(0.01)
+        assert cfg.adv_clip_max == pytest.approx(10.0)
+        assert cfg.visual_log_prob_weight == pytest.approx(0.25)
+        assert cfg.action_log_prob_weight == pytest.approx(2.0)
+        assert cfg.mix_beta == pytest.approx(0.25)
+        assert cfg.ref_kl_coef == pytest.approx(0.1)
+        assert cfg.adaptive_weight_min == pytest.approx(1e-4)
+        assert cfg.kl_mask_threshold == pytest.approx(1e-6)
+        assert cfg.add_kl_coefficient is False
+
+    def test_invalid_loss_mode_raises(self):
+        with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
+            DiffusionLossConfig(loss_mode="not_a_valid_mode")
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"adv_clip_max": 0.0}, "adv_clip_max.*positive"),
+            ({"visual_log_prob_weight": -1.0}, "visual_log_prob_weight.*non-negative"),
+            ({"action_log_prob_weight": -1.0}, "action_log_prob_weight.*non-negative"),
+            ({"action_log_prob_weight": float("inf")}, "action_log_prob_weight.*finite"),
+            (
+                {"visual_log_prob_weight": 0.0, "action_log_prob_weight": 0.0},
+                "At least one diffusion log-probability weight",
+            ),
+            ({"mix_beta": 0.0}, "mix_beta.*positive"),
+            ({"adaptive_weight_min": 0.0}, "adaptive_weight_min.*positive"),
+            ({"kl_mask_threshold": 0.0}, "kl_mask_threshold.*positive"),
+        ],
+    )
+    def test_invalid_loss_values_raise(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            DiffusionLossConfig(**kwargs)
+
+    def test_dance_grpo_loss_mode(self):
+        cfg = DiffusionLossConfig(loss_mode="dance_grpo")
+        assert cfg.loss_mode == "dance_grpo"
+
+
+# ---------------------------------------------------------------------------
+# DiffusionAlgoConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDiffusionAlgoConfig:
+    def test_defaults(self):
+        cfg = DiffusionAlgoConfig()
+        assert cfg.adv_estimator == "flow_grpo"
+        assert cfg.norm_adv_by_std_in_grpo is True
+        assert cfg.global_std is True
+        assert cfg.old_policy_decay_schedule == "copy"
+        assert cfg.old_policy_decay is None
+        assert cfg.old_policy_update_interval == 1
+        assert cfg.timestep_fraction == pytest.approx(1.0)
+        assert cfg.adv_mode == "continuous"
+        assert cfg.rollout_log_prob_validation.enabled is False
+        assert cfg.validation_reference_kl.enabled is False
+        assert cfg.validation_reference_kl.micro_batch_size_per_gpu == 1
+
+    def test_override(self):
+        cfg = DiffusionAlgoConfig(
+            norm_adv_by_std_in_grpo=False,
+            global_std=False,
+            old_policy_decay_schedule="delayed_linear_to_0_999",
+            old_policy_decay=0.5,
+            old_policy_update_interval=2,
+            timestep_fraction=0.5,
+            adv_mode="binary",
+        )
+        assert cfg.norm_adv_by_std_in_grpo is False
+        assert cfg.global_std is False
+        assert cfg.old_policy_decay_schedule == "delayed_linear_to_0_999"
+        assert cfg.old_policy_decay == pytest.approx(0.5)
+        assert cfg.old_policy_update_interval == 2
+        assert cfg.timestep_fraction == pytest.approx(0.5)
+        assert cfg.adv_mode == "binary"
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"adv_mode": "bogus"}, "Invalid adv_mode"),
+            ({"old_policy_decay_schedule": "bogus"}, "Invalid old_policy_decay_schedule"),
+            ({"old_policy_decay": 1.1}, "old_policy_decay.*\\[0, 1\\]"),
+            ({"old_policy_update_interval": 0}, "old_policy_update_interval.*positive"),
+            ({"timestep_fraction": 0.0}, "timestep_fraction.*\\(0, 1\\]"),
+            ({"timestep_fraction": 1.1}, "timestep_fraction.*\\(0, 1\\]"),
+        ],
+    )
+    def test_invalid_algorithm_values_raise(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            DiffusionAlgoConfig(**kwargs)
+
+    @pytest.mark.parametrize("field", ["atol", "rtol"])
+    def test_rollout_log_prob_validation_rejects_negative_tolerance(self, field):
+        with pytest.raises(ValueError, match=field):
+            RolloutLogProbValidationConfig(**{field: -1e-3})
+
+    def test_validation_reference_kl_rejects_nonpositive_micro_batch(self):
+        with pytest.raises(ValueError, match="micro_batch_size_per_gpu.*positive"):
+            ValidationReferenceKLConfig(micro_batch_size_per_gpu=0)
+
+
+# ---------------------------------------------------------------------------
+# DiffusionRolloutAlgoConfig / DiffusionSamplingConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDiffusionRolloutAlgoConfig:
+    def test_defaults(self):
+        cfg = DiffusionRolloutAlgoConfig()
+        assert cfg.noise_level == pytest.approx(1.0)
+        assert cfg.sde_type == "sde"
+        assert cfg.sde_window_size is None
+        assert cfg.sde_window_range is None
+
+    def test_invalid_sample_strategy_raises(self):
+        with pytest.raises(ValueError, match="Unknown sample_strategy"):
+            DiffusionRolloutAlgoConfig(sample_strategy="bogus")
+
+    def test_progressive_requires_positive_iters(self):
+        with pytest.raises(ValueError, match="iters_per_group.*positive"):
+            DiffusionRolloutAlgoConfig(sample_strategy="progressive", iters_per_group=0)
+
+
+class TestDiffusionSamplingConfig:
+    def test_defaults(self):
+        cfg = DiffusionSamplingConfig()
+        assert cfg.pipeline.num_inference_steps == 10
+        assert cfg.seed == 42
+        assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
+
+
+class TestDiffusionRolloutConfig:
+    def test_invalid_rollout_adapter_raises(self):
+        with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
+            DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
+
+
+class TestDiffusionModelConfigPolicyAdapters:
+    def test_diffusion_trainer_allows_explicit_registry_architecture(self):
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config"), version_base=None):
+            cfg = compose(
+                config_name="diffusion_trainer",
+                overrides=["actor_rollout_ref.model.architecture=WNM2D"],
+            )
+
+        assert cfg.actor_rollout_ref.model.architecture == "WNM2D"
+
+    def test_local_files_only_fails_before_hub_fallback(self, tmp_path):
+        from unittest.mock import patch
+
+        missing = tmp_path / "missing-wnm-checkpoint"
+        with patch("huggingface_hub.snapshot_download") as snapshot_download:
+            with pytest.raises(FileNotFoundError, match="Local model directory"):
+                DiffusionModelConfig(
+                    path=str(missing),
+                    architecture="WNM2D",
+                    algorithm="dance_grpo",
+                    load_tokenizer=False,
+                    local_files_only=True,
+                    attn_backend="native",
+                )
+        snapshot_download.assert_not_called()
+
+    def test_policy_state_adapters_via_hydra(self, tmp_path):
+        import json
+        import os
+        from unittest.mock import patch
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "dummy-model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "WanPipeline"}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    f"path={model_dir}",
+                    f"tokenizer_path={model_dir}",
+                    "load_tokenizer=false",
+                    "attn_backend=native",
+                    'policy_state_adapters=["default","old"]',
+                ],
+            )
+        with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
+            model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+        assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
+
+
+# ---------------------------------------------------------------------------
+# FSDPDiffusionActorConfig (instantiation via Hydra / omega_conf)
+# ---------------------------------------------------------------------------
+
+
+class TestFSDPDiffusionActorConfig:
+    def test_instantiate_via_hydra(self):
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="dp_diffusion_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=4",
+                ],
+            )
+        actor_cfg: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+
+        assert actor_cfg.strategy == "fsdp"
+        assert actor_cfg.ppo_micro_batch_size_per_gpu == 4
+        assert isinstance(actor_cfg.diffusion_loss, DiffusionLossConfig)
+
+    def test_engine_strategy_synced(self):
+        """After __post_init__, engine.strategy must mirror actor.strategy."""
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="dp_diffusion_actor",
+                overrides=[
+                    "strategy=fsdp2",
+                    "ppo_micro_batch_size_per_gpu=4",
+                ],
+            )
+        actor_cfg: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+        assert actor_cfg.engine.strategy == "fsdp2"
+
+    def test_loss_config_clip_ratio_respected(self):
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="dp_diffusion_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=4",
+                    "diffusion_loss.clip_ratio=0.05",
+                ],
+            )
+        actor_cfg: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+        assert actor_cfg.diffusion_loss.clip_ratio == pytest.approx(0.05)

@@ -1,0 +1,146 @@
+# Modified by the WNM-3D-RL contributors, 2026.
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
+
+# Path to a local WNM or Wan2.2 model directory
+path: /path/to/model
+
+# Explicit registry architecture; null reads model_index.json
+architecture: null
+
+# RL algorithm name
+algorithm: dance_grpo
+
+# path to the huggingface tokenizer. In case it is not the same as path
+tokenizer_path: null
+
+# Whether to construct tokenizer/processor objects in trainer and workers
+load_tokenizer: True
+
+# whether to use shared memory for model loading
+use_shm: False
+
+# Fail instead of downloading when path is not a local directory
+local_files_only: False
+
+# whether to trust remote code.
+trust_remote_code: False
+
+# custom chat template for the model
+custom_chat_template: null
+
+# whether to use external libs for the model
+external_lib: null
+
+# whether to enable gradient checkpointing.
+enable_gradient_checkpointing: True
+
+# Optional model config path. If null, backends use <path>/<transformer_subfolder>.
+config_path: null
+
+# Subfolder containing the diffusion transformer weights/config.
+transformer_subfolder: transformer
+
+# Diffusers attention backend.
+# Supported: "native", "_flash_3_varlen_hub"
+attn_backend: native
+
+# Set to positive value to enable LoRA (e.g., 32)
+lora_rank: 0
+
+# LoRA scaling factor
+lora_alpha: 64
+
+# Lora initialization method.
+lora_init_weights: gaussian
+
+# Target modules for LoRA adaptation
+target_modules: all-linear
+
+# Target parameters for LoRA adaptation
+target_parameters: null
+
+# Exclude modules from LoRA adaptation
+exclude_modules: null
+
+# Path to pre-trained LoRA adapter to load for continued training
+lora_adapter_path: null
+
+# Named LoRA policy states required by the algorithm. "reference" disables adapters.
+policy_state_adapters: ["default"]
+
+# Convert LoRA parameters to a target dtype for numerical stability (e.g., "fp32", "bf16").
+# Default null means no conversion.
+lora_dtype: null
+
+# FSDP layer name prefixes for LoRA parameter layered summon.
+fsdp_layer_prefixes: ["transformer_blocks."]
+
+# MTP
+mtp: 
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.MtpConfig
+
+  # Whether to enable MTP
+  enable: False
+
+# Pipeline configuration for diffusion model generation
+pipeline:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+  # image/video height
+  height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+
+  # image/video width
+  width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+
+  # inference steps
+  num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,10}
+
+  # Classifier-free guidance scale
+  true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+
+  # Maximum text-encoder token sequence length
+  max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+
+  # Distilled guidance scale
+  guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+
+  # Wan2.2 video number of frames
+  num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+
+# Rollout Algorithm configuration
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Magnitude of SDE noise injected inside the active window
+  noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+
+  # SDE variant: "sde" or "cps"
+  sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+
+  # Mirror rollout initialization-noise grouping for recorded model config
+  init_same_noise: ${oc.select:actor_rollout_ref.rollout.algo.init_same_noise,false}
+
+  # WAM action SDE settings; null reuses noise_level/sde_type
+  action_noise_level: ${oc.select:actor_rollout_ref.rollout.algo.action_noise_level,null}
+
+  # WAM action SDE type; null reuses the visual SDE type
+  action_sde_type: ${oc.select:actor_rollout_ref.rollout.algo.action_sde_type,null}
+
+  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+
+  # [start, end] envelope of valid window-start positions; null = entire trajectory
+  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
